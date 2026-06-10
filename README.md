@@ -37,6 +37,8 @@ trail, and routing layer.
 
 - Reviews complete skill/plugin manifests through trust, dependency, semantic,
   capability, and health checks.
+- Analyzes npm and GitHub source links, builds evidence packets, and infers
+  conservative Skills Router manifests when a repo does not provide one.
 - Stores approved package metadata in a Brain Index.
 - Writes `skills-router.json` rules that host agents can query through MCP or
   CLI.
@@ -46,6 +48,8 @@ trail, and routing layer.
   `--agent-target codex,cursor`.
 - Enforces target-aware routing when agents call `route_task` or
   `skills-router route --target <agent>`.
+- Shows current metadata, routing, and configured skill-folder paths with
+  `skills-router status`.
 - Supports the default all-agent host set: `antigravity`, `antigravity-cli`,
   `antigravity-ide`, `codex`, `claude`, `hermes-agent`, `opencode`, `cline`,
   `cursor`, and `windsurf`.
@@ -186,6 +190,14 @@ skills-router install examples/sample_manifests/weather_tool.json --scope global
 # Review and register by registry package name
 skills-router install writer-pack --package-type skillset --scope workspace:codex-local
 
+# Analyze arbitrary source links without installing
+skills-router analyze https://github.com/owner/repo --json
+skills-router analyze https://www.npmjs.com/package/@scope/writer-pack --json
+
+# Infer a manifest from a source link, then run the normal review pipeline
+skills-router install https://github.com/owner/repo --infer --dry-run --explain --json
+skills-router install https://www.npmjs.com/package/@scope/writer-pack --infer --json
+
 # Install once and make routes visible to all configured AI-agent hosts
 skills-router install writer-pack --package-type skillset --all-agents --json
 
@@ -200,17 +212,23 @@ skills-router install writer-pack --dry-run --explain --json
 
 # Remove Skills Router metadata/routing only
 skills-router uninstall writer-pack --json
+skills-router uninstall writer-pack --dry-run --json
 
 # Reconcile already indexed packages and routes
 skills-router index --json
+skills-router index --dry-run --json
 
 # Discover workspace/global host-agent skills and refine routes
 skills-router refine --json
 skills-router refine writer-pack engram --json
 skills-router refine --workspace-scope workspace:codex-local --json
+skills-router refine --dry-run --json
 
 # Ask Skills Router which route matches a task for the current host
 skills-router route "draft article about release notes" --scope workspace:codex-local --target codex --json
+
+# Show metadata paths, configured skill paths, and routing counts
+skills-router status --json
 
 # Let an AI-agent host execute a human slash request
 skills-router chat "/skills-router install writer-pack for me" --target codex --agent-id codex-local --json
@@ -220,7 +238,12 @@ skills-router chat "/skills-router refine writer-pack engram" --target codex --a
 # Expose Skills Router through stdio JSON-RPC
 skills-router mcp
 
-# Render bridge instructions for a host
+# Generate one-command AI-agent setup kit
+skills-router connect --target codex --json
+skills-router connect --target codex --write-instructions
+skills-router connect --target codex --write-instructions --dry-run
+
+# Render only bridge instructions for a host
 skills-router prompt --target codex
 skills-router prompt --list
 ```
@@ -229,18 +252,38 @@ skills-router prompt --list
 
 | Command | Purpose |
 | :--- | :--- |
-| `install <manifest-or-package>` | Resolve, review, register, and route a package. |
+| `analyze <npm-or-github-source>` | Read bounded source evidence and infer a reviewable Skills Router manifest without installing. |
+| `install <manifest-or-package-or-source>` | Resolve or infer, review, register, and route a package. |
 | `index` | Rebuild indexed vectors/routes and detect conflicts or stale routes. |
 | `refine [skillset ...]` | Discover external skills, import metadata, and reconcile routes. |
 | `route <task>` | Query active or review-needed routes for a task. |
 | `uninstall <tool_id>` | Remove Skills Router-owned metadata/routing only. |
 | `list` | List indexed tools. |
+| `status` | Show metadata paths, configured skill paths, and route counts. |
 | `inspect <tool_id>` | Print one Brain Index entry. |
 | `audit` | Query audit events. |
 | `watch` | Run Registry Watch once or as a daemon. |
+| `connect` | Render MCP config plus bridge instructions, and optionally write them. |
 | `prompt` | Render host-specific bridge instructions. |
 | `chat` | Parse and execute chat-shaped `/skills-router` requests. |
 | `mcp` | Run the local stdio JSON-RPC tool server. |
+
+## Dry Run
+
+Every write-capable command supports a no-write path:
+
+```bash
+skills-router install writer-pack --dry-run --json
+skills-router uninstall writer-pack --dry-run --json
+skills-router index --dry-run --json
+skills-router refine --dry-run --json
+skills-router watch --once --dry-run --json
+skills-router connect --target codex --write-instructions --dry-run --json
+```
+
+Dry-run responses include `dry_run: true`. For MCP, pass `dry_run: true` to
+write-capable tools such as `install_tool`, `uninstall_tool`, `index_routes`,
+`refine_routes`, and `watch_once`.
 
 ## One-Time All-Agent Installs
 
@@ -333,6 +376,8 @@ operations:
 /skills-router install <package> for me
 /skills-router install <package> for all agents
 /skills-router install <package> globally dry run
+/skills-router analyze <npm-or-github-link>
+/skills-router install <npm-or-github-link> for me
 /skills-router install <package> skillset only needed skills for me
 /skills-router uninstall <tool_id>
 /skills-router index
@@ -340,6 +385,7 @@ operations:
 /skills-router refine <skillset> <skillset>
 /skills-router route <task>
 /skills-router list
+/skills-router status
 /skills-router inspect <tool_id>
 /skills-router audit --tool <tool_id>
 /skills-router watch --once
@@ -356,8 +402,10 @@ returns `human_summary` for short agent replies.
 `skills-router mcp` exposes:
 
 - `get_agent_prompt`
+- `get_router_status`
 - `parse_slash_command`
 - `run_slash_command`
+- `analyze_package_source`
 - `install_tool`
 - `uninstall_tool`
 - `index_routes`
@@ -392,7 +440,19 @@ lists are enforced for the calling host.
 | `hermes-agent` | `SOUL.md`, `AGENTS.md` |
 | `windsurf` | `.windsurf/rules/skills-router.md`, `AGENTS.md` |
 
-Render target-specific bridge text with:
+Generate a setup kit for an agent host with:
+
+```bash
+skills-router connect --target codex --json
+skills-router connect --target cursor --write-instructions
+skills-router connect --target codex --from-source --json
+```
+
+`connect` returns the MCP server config, target instruction file paths, bridge
+prompt, and CLI fallback command. `--write-instructions` writes a managed bridge
+prompt block to the target's first workspace instruction file.
+
+Render only target-specific bridge text with:
 
 ```bash
 skills-router prompt --target codex

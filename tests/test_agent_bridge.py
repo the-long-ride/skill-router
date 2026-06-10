@@ -51,6 +51,51 @@ def test_render_agent_prompt_full_detail_keeps_expanded_contract():
     assert "Parsing rules" in prompt
 
 
+def test_build_agent_connection_from_source_includes_mcp_env(tmp_path):
+    from skills_router.agent_bridge.connect import build_agent_connection
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path / "data"))
+    config.workspace_root = str(tmp_path)
+
+    result = build_agent_connection(
+        config,
+        target="cursor",
+        agent_id="cursor-local",
+        from_source=True,
+    )
+
+    server = result["mcp_config"]["mcpServers"]["skills-router"]
+    assert result["target"] == "cursor"
+    assert server["args"] == ["-m", "skills_router.cli", "mcp"]
+    assert "PYTHONPATH" in server["env"]
+    assert result["instruction_files"][0]["configured"] == (
+        ".cursor/rules/skills-router.md"
+    )
+    assert "run_slash_command" in result["bridge_prompt"]
+
+
+def test_write_bridge_instructions_creates_managed_block(tmp_path):
+    from skills_router.agent_bridge.connect import (
+        BEGIN_MARKER,
+        build_agent_connection,
+        write_bridge_instructions,
+    )
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path / "data"))
+    config.workspace_root = str(tmp_path)
+    result = build_agent_connection(config, target="codex", agent_id="codex-local")
+
+    first = write_bridge_instructions(config, result)
+    result["bridge_prompt"] = "# Changed Bridge"
+    second = write_bridge_instructions(config, result)
+
+    text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert first["action"] == "created"
+    assert second["action"] == "updated"
+    assert text.count(BEGIN_MARKER) == 1
+    assert "# Changed Bridge" in text
+
+
 def test_parse_install_for_me_uses_workspace_scope():
     from skills_router.agent_bridge.parser import parse_slash_command
 
@@ -66,6 +111,19 @@ def test_parse_install_for_me_uses_workspace_scope():
     assert intent.scope == "workspace:cline-local"
     assert intent.delegated is True
     assert intent.auto_approve is False
+
+
+def test_parse_analyze_source_link():
+    from skills_router.agent_bridge.parser import parse_slash_command
+
+    intent = parse_slash_command(
+        "/skills-router analyze https://github.com/owner/repo",
+        target="codex",
+        agent_id="codex-local",
+    )
+
+    assert intent.command == "analyze"
+    assert intent.arguments["source_ref"] == "https://github.com/owner/repo"
 
 
 def test_parse_global_dry_run_auto_approve():
@@ -126,6 +184,20 @@ def test_parse_index_command_defaults_to_all_scopes():
     )
 
     assert intent.command == "index"
+    assert intent.scope is None
+
+
+def test_parse_status_command_defaults_to_all_scopes():
+    from skills_router.agent_bridge.parser import parse_slash_command
+
+    intent = parse_slash_command(
+        "/skills-router status",
+        target="codex",
+        agent_id="codex-local",
+    )
+
+    assert intent.command == "status"
+    assert intent.arguments == {}
     assert intent.scope is None
 
 
@@ -466,6 +538,25 @@ def test_chat_refine_defaults_workspace_discovery_to_agent_scope(tmp_path):
     assert routes["engram"]["scope"] == "workspace:codex-local"
 
 
+def test_execute_slash_command_status_reports_paths(tmp_path):
+    from skills_router.agent_bridge.executor import execute_slash_command
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path))
+
+    result = execute_slash_command(
+        "/skills-router status",
+        config,
+        target="codex",
+        agent_id="codex-local",
+    )
+
+    assert result["status"] == "OK"
+    assert result["router_status"] == "empty"
+    assert "state_paths" in result
+    assert "skill_paths" in result
+    assert result["human_summary"].startswith("Skills Router status:")
+
+
 def test_refine_imports_global_skills_router_records_for_workspace(tmp_path):
     from skills_router.agent_bridge.indexer import refine_installed_skillsets
     from skills_router.storage.memory_store import MemoryBrainIndexStore
@@ -682,6 +773,62 @@ def test_execute_slash_command_uninstalls_skills_router_state(tmp_path):
     )
     assert audit_entries[0]["wg_case"] == "UNINSTALL"
     assert "Package resources were not removed" in result["human_summary"]
+
+
+def test_execute_slash_command_uninstall_dry_run_preserves_state(tmp_path):
+    from skills_router.agent_bridge.executor import execute_slash_command
+    from skills_router.agent_bridge.routing import (
+        build_routing_plan,
+        persist_routing_plan,
+        read_routing_state,
+    )
+    from skills_router.layers.lockfile import SkillsRouterLockfile
+    from skills_router.storage.memory_store import MemoryBrainIndexStore
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path))
+    store = MemoryBrainIndexStore(
+        brain_index_path=config.brain_index_path,
+        dep_graph_path=config.dep_graph_path,
+    )
+    manifest = {
+        "tool_id": "writer-pack",
+        "name": "Writer Pack",
+        "version": "1.0.0",
+        "dependencies": {"markdown": ">=3.0"},
+        "layer_meta": {"install_scope": "workspace:codex-local"},
+    }
+    store.save_tool(manifest)
+    store.merge_deps_for_tool("writer-pack", manifest["dependencies"])
+    SkillsRouterLockfile(config.registry_lockfile_path).upsert(
+        manifest,
+        requested="writer-pack",
+        scope="workspace:codex-local",
+    )
+    persist_routing_plan(
+        config,
+        build_routing_plan(manifest, scope="workspace:codex-local"),
+    )
+
+    result = execute_slash_command(
+        "/skills-router uninstall writer-pack for me dry run",
+        config,
+        target="codex",
+        agent_id="codex-local",
+    )
+
+    refreshed = MemoryBrainIndexStore(
+        brain_index_path=config.brain_index_path,
+        dep_graph_path=config.dep_graph_path,
+    )
+    assert result["status"] == "DRY_RUN_UNINSTALLED"
+    assert result["dry_run"] is True
+    assert result["would_remove"]["brain_index"] is True
+    assert refreshed.get_tool("writer-pack") is not None
+    assert "markdown" in refreshed.get_dep_graph()
+    assert "writer-pack" in SkillsRouterLockfile(
+        config.registry_lockfile_path
+    ).read()["tools"]
+    assert "writer-pack" in read_routing_state(config)["packages"]
 
 
 def test_uninstall_reindexes_remaining_conflicts(tmp_path):

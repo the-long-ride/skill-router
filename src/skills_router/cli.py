@@ -1,6 +1,7 @@
 """CLI entry point for skills-router.
 
-Provides subcommands: install, uninstall, index, list, inspect, audit, watch, prompt, chat.
+Provides subcommands: install, uninstall, index, list, status, inspect, audit,
+watch, prompt, connect, chat.
 """
 
 from __future__ import annotations
@@ -23,16 +24,19 @@ from skills_router.storage.memory_store import MemoryBrainIndexStore
 
 console = Console()
 COMMAND_NAMES = {
+    "analyze",
     "install",
     "uninstall",
     "index",
     "refine",
     "list",
+    "status",
     "inspect",
     "audit",
     "watch",
     "mcp",
     "prompt",
+    "connect",
     "chat",
     "route",
 }
@@ -78,6 +82,7 @@ def _result_exit_code(result: dict) -> int:
     if status in (
         "INSTALLED",
         "UNINSTALLED",
+        "DRY_RUN_UNINSTALLED",
         "DRY_RUN_APPROVED",
         "OK",
         "REVIEW_NEEDED",
@@ -197,16 +202,92 @@ def _agent_target_note(result: dict[str, Any]) -> str:
     )
 
 
-def cmd_install(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
-    """Handle the install subcommand."""
+def _resolve_manifest_for_install(
+    manifest_ref: str,
+    config: SkillsRouterConfig,
+    *,
+    infer: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     from skills_router.layers.registry_resolver import (
         RegistryResolutionError,
         RegistryResolver,
     )
+    from skills_router.layers.source_analyzer import (
+        SourceAnalysisError,
+        SourceAnalyzer,
+        is_supported_source_ref,
+    )
+
+    if infer:
+        try:
+            analysis = SourceAnalyzer(config).analyze(manifest_ref)
+        except SourceAnalysisError as exc:
+            raise RegistryResolutionError(str(exc)) from exc
+        return analysis["manifest"], analysis
 
     resolver = RegistryResolver(config)
     try:
-        manifest = resolver.resolve(args.manifest)
+        return resolver.resolve(manifest_ref), None
+    except RegistryResolutionError as exc:
+        if not is_supported_source_ref(manifest_ref):
+            raise
+        try:
+            analysis = SourceAnalyzer(config).analyze(manifest_ref)
+        except SourceAnalysisError as source_exc:
+            raise RegistryResolutionError(
+                f"{exc}; source inference also failed: {source_exc}"
+            ) from source_exc
+        return analysis["manifest"], analysis
+
+
+def cmd_analyze(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
+    """Handle the analyze subcommand."""
+    from skills_router.layers.source_analyzer import SourceAnalysisError, SourceAnalyzer
+
+    try:
+        result = SourceAnalyzer(config).analyze(args.source)
+    except SourceAnalysisError as exc:
+        if getattr(args, "json_output", False):
+            _print_json({"status": "ERROR", "error": str(exc)})
+        else:
+            console.print(f"[red]Error: {exc}[/red]")
+        return EXIT_ERROR
+
+    if getattr(args, "json_output", False):
+        _print_json(result)
+        return EXIT_SUCCESS
+
+    manifest = result["manifest"]
+    analysis = manifest.get("layer_meta", {}).get("source_analysis", {})
+    warnings = result.get("warnings") or []
+    warning_text = "\n".join(f"   Warning: {warning}" for warning in warnings)
+    if warning_text:
+        warning_text = "\n" + warning_text
+    console.print(
+        Panel(
+            f"Analyzed [bold cyan]{result['source']['identifier']}[/bold cyan]\n"
+            f"   Manifest: {manifest['tool_id']} ({manifest['version']})\n"
+            f"   Confidence: {analysis.get('confidence', 'unknown')}\n"
+            f"   Evidence files: {len(result['evidence'].get('files_seen', []))}"
+            f"{warning_text}",
+            border_style="cyan",
+        )
+    )
+    return EXIT_SUCCESS
+
+
+def cmd_install(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
+    """Handle the install subcommand."""
+    from skills_router.layers.registry_resolver import (
+        RegistryResolutionError,
+    )
+
+    try:
+        manifest, source_analysis = _resolve_manifest_for_install(
+            args.manifest,
+            config,
+            infer=bool(getattr(args, "infer", False)),
+        )
     except RegistryResolutionError as e:
         if getattr(args, "json_output", False):
             _print_json({"status": "ERROR", "error": str(e)})
@@ -241,6 +322,9 @@ def cmd_install(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
         user_id=args.user or "cli-user",
         dry_run=getattr(args, "dry_run", False),
     )
+    result["dry_run"] = bool(getattr(args, "dry_run", False))
+    if source_analysis is not None:
+        result["source_analysis"] = source_analysis
     if target_report is not None:
         result["agent_targets"] = target_report
     routing_plan = None
@@ -444,13 +528,23 @@ def cmd_uninstall(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
         args.tool_id,
         user_id=args.user or "cli-user",
         scope=args.scope,
+        dry_run=getattr(args, "dry_run", False),
     )
 
     if args.json_output:
         _print_json(result)
         return _result_exit_code(result)
 
-    if result["status"] == "UNINSTALLED":
+    if result["status"] == "DRY_RUN_UNINSTALLED":
+        console.print(
+            Panel(
+                f"DRY RUN OK [bold green]{result['tool_id']}[/bold green] "
+                "would be removed from Skills Router metadata/routing\n"
+                "   Package resources would not be removed.",
+                border_style="green",
+            )
+        )
+    elif result["status"] == "UNINSTALLED":
         console.print(
             Panel(
                 f"OK [bold green]{result['tool_id']}[/bold green] "
@@ -519,6 +613,75 @@ def cmd_list(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
 
     console.print(table)
     return EXIT_SUCCESS
+
+
+def cmd_status(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
+    """Handle the status subcommand."""
+    from skills_router.status import build_router_status
+
+    store = _build_store(config)
+    result = build_router_status(config, store)
+
+    if args.json_output:
+        _print_json(result)
+        return EXIT_SUCCESS
+
+    console.print(
+        Panel(
+            result["human_summary"],
+            title="[bold cyan]Skills Router Status[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+    _print_status_state_paths(result)
+    _print_status_skill_paths(result)
+    return EXIT_SUCCESS
+
+
+def _print_status_state_paths(result: dict[str, Any]) -> None:
+    table = Table(
+        title="Router Metadata Paths",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Name", style="bold")
+    table.add_column("Kind")
+    table.add_column("Exists")
+    table.add_column("Path")
+    for entry in result.get("state_paths", []):
+        table.add_row(
+            str(entry.get("name", "")),
+            str(entry.get("kind", "")),
+            "yes" if entry.get("exists") else "no",
+            str(entry.get("path", "")),
+        )
+    console.print(table)
+
+
+def _print_status_skill_paths(result: dict[str, Any]) -> None:
+    table = Table(
+        title="Configured Host Skill Paths",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Scope", style="bold")
+    table.add_column("Configured")
+    table.add_column("Exists")
+    table.add_column("Path")
+    rows = []
+    for scope in ("workspace", "global"):
+        rows.extend(result.get("skill_paths", {}).get(scope, []))
+    for entry in rows:
+        exists = "unresolved env" if entry.get("env_unresolved") else (
+            "yes" if entry.get("exists") else "no"
+        )
+        table.add_row(
+            str(entry.get("scope", "")),
+            str(entry.get("configured", "")),
+            exists,
+            str(entry.get("path", "")),
+        )
+    console.print(table)
 
 
 def cmd_inspect(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
@@ -630,14 +793,24 @@ def cmd_watch(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
         soft_warn_threshold=config.trust_soft_warn_threshold,
         hysteresis_band=config.hysteresis_band,
         state_path=config.registry_watch_state_path,
+        dry_run=bool(getattr(args, "dry_run", False)),
     )
 
     if args.once:
-        result = daemon.run_once(seed_hashes=True)
+        result = daemon.run_once(
+            seed_hashes=True,
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
         if args.json_output:
             _print_json(result)
         else:
-            console.print("[green]OK Registry Watch completed one check cycle[/green]")
+            if getattr(args, "dry_run", False):
+                console.print(
+                    "[green]DRY RUN OK Registry Watch completed one check cycle "
+                    "without writing state or sending notifications[/green]"
+                )
+            else:
+                console.print("[green]OK Registry Watch completed one check cycle[/green]")
         return EXIT_SUCCESS
 
     if args.json_output:
@@ -661,6 +834,7 @@ def cmd_watch(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
             f"  Check interval: {check_interval}s\n"
             f"  Admin channel: {admin_channel_id}\n"
             f"  Metrics: {metrics_status}\n"
+            f"  Dry run: {'yes' if getattr(args, 'dry_run', False) else 'no'}\n"
             f"  Press Ctrl+C to stop",
             title="[bold cyan]Registry Watch[/bold cyan]",
             border_style="cyan",
@@ -747,6 +921,83 @@ def cmd_prompt(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
     return EXIT_SUCCESS
 
 
+def cmd_connect(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
+    """Render or write AI-agent connection setup."""
+    from skills_router.agent_bridge.connect import (
+        build_agent_connection,
+        write_bridge_instructions,
+    )
+
+    try:
+        result = build_agent_connection(
+            config,
+            target=args.target,
+            agent_id=args.agent_id,
+            detail=args.detail,
+            from_source=args.from_source,
+        )
+        if args.write_instructions:
+            result["written_instruction"] = write_bridge_instructions(
+                config,
+                result,
+                instruction_file=args.instruction_file,
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+        result["dry_run"] = bool(getattr(args, "dry_run", False))
+    except ValueError as exc:
+        if args.json_output:
+            _print_json({"status": "ERROR", "error": str(exc)})
+        else:
+            console.print(f"[red]Error: {exc}[/red]")
+        return EXIT_ERROR
+
+    if args.json_output:
+        _print_json(result)
+        return EXIT_SUCCESS
+
+    console.print(
+        Panel(
+            result["human_summary"],
+            title="[bold cyan]Skills Router Connect[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+    console.print(Panel.fit(
+        json.dumps(result["mcp_config"], indent=2),
+        title="[bold cyan]MCP Config[/bold cyan]",
+        border_style="cyan",
+    ))
+    table = Table(
+        title="Instruction Files",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Use")
+    table.add_column("Exists")
+    table.add_column("Path")
+    for item in result["instruction_files"]:
+        table.add_row(
+            "yes" if item["recommended"] else "",
+            "yes" if item["exists"] else "no",
+            str(item["path"]),
+        )
+    console.print(table)
+    if result.get("written_instruction"):
+        written = result["written_instruction"]
+        console.print(
+            f"[green]{written['action'].title()} bridge prompt:[/green] "
+            f"{written['path']}"
+        )
+    else:
+        console.print(Panel(
+            result["bridge_prompt"],
+            title="[bold cyan]Bridge Prompt[/bold cyan]",
+            border_style="cyan",
+        ))
+    console.print(f"[dim]CLI fallback: {result['fallback_command']}[/dim]")
+    return EXIT_SUCCESS
+
+
 def cmd_chat(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
     """Execute or parse a chat-shaped /skills-router request."""
     text = " ".join(args.text)
@@ -813,14 +1064,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     subs = parser.add_subparsers(dest="command", help="Available commands")
 
+    # -- analyze ---------------------------------------------------------------
+    p_analyze = subs.add_parser(
+        "analyze",
+        help="Analyze an npm/GitHub source link and infer a Skills Router manifest",
+    )
+    p_analyze.add_argument(
+        "source",
+        help="GitHub URL, npm package URL, github:owner/repo, or npm:<package>",
+    )
+    _add_json_arg(p_analyze)
+
     # -- install ---------------------------------------------------------------
     p_install = subs.add_parser(
         "install",
-        help="Install a tool from a local manifest or registry package name",
+        help="Install a tool from a manifest, registry package, or source link",
     )
     p_install.add_argument(
         "manifest",
-        help="Path to the tool manifest JSON file or registry package name",
+        help=(
+            "Path to manifest JSON, registry package name, or supported "
+            "npm/GitHub source link"
+        ),
     )
     p_install.add_argument("--scope", help="Install scope (global, workspace:<id>)")
     p_install.add_argument(
@@ -851,6 +1116,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--explain",
         action="store_true",
         help="Print the decision summary after install or dry-run",
+    )
+    p_install.add_argument(
+        "--infer",
+        action="store_true",
+        help=(
+            "Infer a Skills Router manifest from a supported npm/GitHub source "
+            "instead of requiring an existing skills-router.json"
+        ),
     )
     p_install.add_argument(
         "--package-type",
@@ -940,6 +1213,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--scope",
         help="Scope to use when re-indexing remaining routes after uninstall",
     )
+    p_uninstall.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview metadata/routing removal without writing state",
+    )
     p_uninstall.add_argument("--user", help="User ID (default: cli-user)")
     _add_json_arg(p_uninstall)
 
@@ -947,6 +1225,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_list = subs.add_parser("list", help="List installed tools")
     p_list.add_argument("--scope", help="Filter by scope")
     _add_json_arg(p_list)
+
+    # -- status ----------------------------------------------------------------
+    p_status = subs.add_parser(
+        "status",
+        help="Show Skills Router metadata paths, skill paths, and route state",
+    )
+    _add_json_arg(p_status)
 
     # -- inspect ---------------------------------------------------------------
     p_inspect = subs.add_parser("inspect", help="Inspect a tool's full Brain Index entry")
@@ -980,6 +1265,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--metrics-port",
         type=int,
         help="Serve Prometheus metrics on this local port in daemon mode",
+    )
+    p_watch.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run checks without saving watch state, trust updates, or notifications",
     )
     _add_json_arg(p_watch)
 
@@ -1017,6 +1307,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prompt detail level (default: compact to reduce agent context cost)",
     )
     _add_json_arg(p_prompt)
+
+    # -- connect ---------------------------------------------------------------
+    p_connect = subs.add_parser(
+        "connect",
+        help="Render MCP config and optional bridge instructions for an AI-agent host",
+    )
+    p_connect.add_argument(
+        "--target",
+        default="codex",
+        help="Agent target or alias",
+    )
+    p_connect.add_argument(
+        "--agent-id",
+        default="local-agent",
+        help="Agent/user id for workspace scope examples",
+    )
+    p_connect.add_argument(
+        "--detail",
+        choices=["compact", "full"],
+        default="compact",
+        help="Bridge prompt detail level",
+    )
+    p_connect.add_argument(
+        "--from-source",
+        action="store_true",
+        help="Generate MCP config that runs this checkout through Python/PYTHONPATH",
+    )
+    p_connect.add_argument(
+        "--write-instructions",
+        action="store_true",
+        help="Write or update a managed bridge prompt block in an instruction file",
+    )
+    p_connect.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview --write-instructions without writing files",
+    )
+    p_connect.add_argument(
+        "--instruction-file",
+        help="Workspace-relative instruction file to write when --write-instructions is set",
+    )
+    _add_json_arg(p_connect)
 
     # -- chat ------------------------------------------------------------------
     p_chat = subs.add_parser(
@@ -1097,16 +1429,19 @@ def main() -> None:
 
     # Dispatch
     commands = {
+        "analyze": cmd_analyze,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
         "index": cmd_index,
         "refine": cmd_refine,
         "list": cmd_list,
+        "status": cmd_status,
         "inspect": cmd_inspect,
         "audit": cmd_audit,
         "watch": cmd_watch,
         "mcp": cmd_mcp,
         "prompt": cmd_prompt,
+        "connect": cmd_connect,
         "chat": cmd_chat,
         "route": cmd_route,
     }

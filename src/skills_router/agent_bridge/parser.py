@@ -13,6 +13,8 @@ from skills_router.agent_bridge.profiles import (
 
 
 COMMAND_ALIASES = {
+    "analyze": "analyze",
+    "analyse": "analyze",
     "install": "install",
     "add": "install",
     "uninstall": "uninstall",
@@ -26,6 +28,9 @@ COMMAND_ALIASES = {
     "reconcile": "refine",
     "list": "list",
     "ls": "list",
+    "status": "status",
+    "paths": "status",
+    "where": "status",
     "inspect": "inspect",
     "show": "inspect",
     "audit": "audit",
@@ -135,7 +140,7 @@ def parse_slash_command(
     scope_default = default_scope or f"workspace:{agent_id}"
     if all_agents:
         scope = "global"
-    elif command in {"index", "refine"} and not _has_explicit_scope(tail):
+    elif command in {"index", "refine", "status"} and not _has_explicit_scope(tail):
         scope = None
     else:
         scope = _extract_scope(tail, scope_default)
@@ -190,6 +195,11 @@ def _command_token(token: str) -> str:
 
 
 def _extract_command_args(command: str, tokens: list[str]) -> dict[str, Any]:
+    if command == "analyze":
+        source = _first_positional(tokens)
+        if not source:
+            raise ValueError("Analyze requires an npm/GitHub source link")
+        return {"source_ref": source}
     if command == "install":
         package = _first_positional(tokens)
         if not package:
@@ -204,6 +214,8 @@ def _extract_command_args(command: str, tokens: list[str]) -> dict[str, Any]:
         return {}
     if command == "refine":
         return {"skillsets": _positionals(tokens)}
+    if command == "status":
+        return {}
     if command == "inspect":
         tool_id = _first_positional(tokens)
         if not tool_id:

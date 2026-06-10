@@ -16,8 +16,13 @@ from skills_router.config import SkillsRouterConfig
 from skills_router.daemon.live_signal_fetcher import LiveSignalFetcher
 from skills_router.daemon.registry_watch import RegistryWatchDaemon
 from skills_router.layers.lockfile import SkillsRouterLockfile
-from skills_router.layers.registry_resolver import RegistryResolver
+from skills_router.layers.registry_resolver import RegistryResolutionError, RegistryResolver
 from skills_router.layers.semantic_evaluator import SemanticEvaluator
+from skills_router.layers.source_analyzer import (
+    SourceAnalysisError,
+    SourceAnalyzer,
+    is_supported_source_ref,
+)
 from skills_router.layers.trust_gate import TrustGate
 from skills_router.orchestrator import SkillsRouterOrchestrator
 from skills_router.storage.memory_store import MemoryBrainIndexStore
@@ -73,7 +78,7 @@ def handle_request(request: dict[str, Any], config: SkillsRouterConfig) -> dict[
                 "error": {"code": -32601, "message": f"Unknown method: {method}"},
             }
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
-    except Exception as exc:
+    except RegistryResolutionError as exc:
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -100,6 +105,12 @@ def _call_tool(params: dict[str, Any], config: SkillsRouterConfig) -> dict[str, 
         }
         return _tool_result(result)
 
+    if name == "get_router_status":
+        from skills_router.status import build_router_status
+
+        store = _build_store(config)
+        return _tool_result(build_router_status(config, store))
+
     if name == "parse_slash_command":
         from skills_router.agent_bridge.parser import parse_slash_command
 
@@ -123,6 +134,10 @@ def _call_tool(params: dict[str, Any], config: SkillsRouterConfig) -> dict[str, 
         )
         return _tool_result(result)
 
+    if name == "analyze_package_source":
+        result = SourceAnalyzer(config).analyze(arguments["source_ref"])
+        return _tool_result(result)
+
     if name == "install_tool":
         from skills_router.agent_bridge.routing import (
             build_routing_plan,
@@ -130,9 +145,12 @@ def _call_tool(params: dict[str, Any], config: SkillsRouterConfig) -> dict[str, 
         )
 
         store = _build_store(config)
-        resolver = RegistryResolver(config)
         manifest_ref = arguments["package_or_manifest"]
-        manifest = resolver.resolve(manifest_ref)
+        manifest, source_analysis = _resolve_manifest(
+            config,
+            manifest_ref,
+            infer=bool(arguments.get("infer", False)),
+        )
         auto_approve = bool(arguments.get("auto_approve", False))
         decision = (lambda _prompt, _options: 0) if auto_approve else _cancel
         all_agents = bool(arguments.get("all_agents", False))
@@ -155,6 +173,7 @@ def _call_tool(params: dict[str, Any], config: SkillsRouterConfig) -> dict[str, 
             user_id=arguments.get("user_id", "mcp-agent"),
             dry_run=bool(arguments.get("dry_run", False)),
         )
+        result["dry_run"] = bool(arguments.get("dry_run", False))
         if result.get("status") in ("INSTALLED", "DRY_RUN_APPROVED"):
             routing_plan = build_routing_plan(
                 manifest,
@@ -166,6 +185,8 @@ def _call_tool(params: dict[str, Any], config: SkillsRouterConfig) -> dict[str, 
                 ),
             )
             result["skills_routing"] = routing_plan
+        if source_analysis is not None:
+            result["source_analysis"] = source_analysis
         if target_report is not None:
             result["agent_targets"] = target_report
         if result.get("status") == "INSTALLED":
@@ -228,6 +249,7 @@ def _call_tool(params: dict[str, Any], config: SkillsRouterConfig) -> dict[str, 
             arguments["tool_id"],
             user_id=arguments.get("user_id", "mcp-agent"),
             scope=arguments.get("scope"),
+            dry_run=bool(arguments.get("dry_run", False)),
         )
         return _tool_result(result)
 
@@ -271,8 +293,14 @@ def _call_tool(params: dict[str, Any], config: SkillsRouterConfig) -> dict[str, 
             ),
             admin_channel_id=config.admin_channel_id,
             state_path=config.registry_watch_state_path,
+            dry_run=bool(arguments.get("dry_run", False)),
         )
-        return _tool_result(daemon.run_once(seed_hashes=True))
+        return _tool_result(
+            daemon.run_once(
+                seed_hashes=True,
+                dry_run=bool(arguments.get("dry_run", False)),
+            )
+        )
 
     raise ValueError(f"Unknown tool: {name}")
 
@@ -282,6 +310,29 @@ def _build_store(config: SkillsRouterConfig) -> MemoryBrainIndexStore:
         brain_index_path=config.brain_index_path,
         dep_graph_path=config.dep_graph_path,
     )
+
+
+def _resolve_manifest(
+    config: SkillsRouterConfig,
+    manifest_ref: str,
+    *,
+    infer: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if infer:
+        analysis = SourceAnalyzer(config).analyze(manifest_ref)
+        return analysis["manifest"], analysis
+    try:
+        return RegistryResolver(config).resolve(manifest_ref), None
+    except Exception as exc:
+        if not is_supported_source_ref(manifest_ref):
+            raise
+        try:
+            analysis = SourceAnalyzer(config).analyze(manifest_ref)
+        except SourceAnalysisError as source_exc:
+            raise ValueError(
+                f"{exc}; source inference also failed: {source_exc}"
+            ) from source_exc
+        return analysis["manifest"], analysis
 
 
 def _cancel(_prompt: str, options: list[str]) -> int:
@@ -299,6 +350,13 @@ def _compact_tool_text(result: dict[str, Any]) -> str:
         return str(result["prompt"])
     if result.get("human_summary"):
         return str(result["human_summary"])
+    if result.get("manifest") and result.get("source"):
+        manifest = result["manifest"]
+        source = result["source"]
+        return (
+            f"Analyzed {source.get('identifier', 'source')}; "
+            f"inferred {manifest.get('tool_id', 'tool')}."
+        )
     if result.get("intent"):
         intent = result["intent"]
         return f"Parsed /skills-router {intent.get('command', 'request')} request."
@@ -338,6 +396,14 @@ def _tool_specs() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "get_router_status",
+            "description": (
+                "Show Skills Router metadata paths, configured host skill "
+                "paths, route counts, and overall router status."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
             "name": "parse_slash_command",
             "description": "Parse a chat-shaped /skills-router request into structured intent.",
             "inputSchema": {
@@ -366,6 +432,26 @@ def _tool_specs() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "analyze_package_source",
+            "description": (
+                "Analyze an npm/GitHub package source link and return a "
+                "reviewable inferred Skills Router manifest without installing it."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_ref": {
+                        "type": "string",
+                        "description": (
+                            "GitHub URL, npm package URL, github:owner/repo, "
+                            "or npm:<package>."
+                        ),
+                    },
+                },
+                "required": ["source_ref"],
+            },
+        },
+        {
             "name": "install_tool",
             "description": "Install or dry-run an skills-router tool manifest/package.",
             "inputSchema": {
@@ -376,6 +462,13 @@ def _tool_specs() -> list[dict[str, Any]]:
                     "user_id": {"type": "string"},
                     "dry_run": {"type": "boolean"},
                     "auto_approve": {"type": "boolean"},
+                    "infer": {
+                        "type": "boolean",
+                        "description": (
+                            "Infer a manifest from a supported npm/GitHub source "
+                            "link when no skills-router.json is available."
+                        ),
+                    },
                     "package_type": {
                         "type": "string",
                         "enum": ["auto", "skillset", "plugin", "tool"],
@@ -461,6 +554,7 @@ def _tool_specs() -> list[dict[str, Any]]:
                     "tool_id": {"type": "string"},
                     "user_id": {"type": "string"},
                     "scope": {"type": "string"},
+                    "dry_run": {"type": "boolean"},
                 },
                 "required": ["tool_id"],
             },
@@ -482,6 +576,9 @@ def _tool_specs() -> list[dict[str, Any]]:
         {
             "name": "watch_once",
             "description": "Run one Registry Watch check cycle.",
-            "inputSchema": {"type": "object", "properties": {}},
+            "inputSchema": {
+                "type": "object",
+                "properties": {"dry_run": {"type": "boolean"}},
+            },
         },
     ]

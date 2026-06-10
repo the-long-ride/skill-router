@@ -201,6 +201,50 @@ class TestRegistryWatchDaemon:
         assert degraded[0]["target"] == "agent-1"
         assert "tool-a" in daemon._degraded_tools
 
+    def test_run_once_dry_run_skips_state_trust_and_notifications(self, tmp_path):
+        """Dry-run watch reports possible alerts without mutating persisted state."""
+        store = MemoryBrainIndexStore(
+            brain_index_path=str(tmp_path / "brain_index.json"),
+            dep_graph_path=str(tmp_path / "dep_graph.json"),
+        )
+        notifier = _MemoryNotifier()
+        tool = {
+            "tool_id": "tool-a",
+            "name": "Tool A",
+            "layer_4_telemetry": {"last_known_stable_state_hash": "hash-a"},
+            "layer_5_provenance": {
+                "trust_score": 0.9,
+                "signature_verified": True,
+                "install_source": "official-registry",
+            },
+            "layer_meta": {"install_scope": "global", "agent_id": "agent-1"},
+        }
+        store.save_tool(tool)
+        daemon = RegistryWatchDaemon(
+            evaluator=_NoOverlapEvaluator(),
+            trust_gate=TrustGate(),
+            brain_index_db=store,
+            wg_notifier=notifier,
+            live_signal_fetcher=_SequenceFetcher([_low_trust_manifest()]),
+            state_path=str(tmp_path / "watch_state.json"),
+        )
+        daemon._seed_hashes()
+
+        result = daemon.run_once(dry_run=True)
+
+        refreshed = MemoryBrainIndexStore(
+            brain_index_path=str(tmp_path / "brain_index.json"),
+            dep_graph_path=str(tmp_path / "dep_graph.json"),
+        )
+        assert result["dry_run"] is True
+        assert result["state_saved"] is False
+        assert result["notifications_sent"] == 0
+        assert result["notifications_would_send"] == 1
+        assert result["would_degrade_tools"] == ["tool-a"]
+        assert notifier.history == []
+        assert not (tmp_path / "watch_state.json").exists()
+        assert refreshed.get_tool("tool-a")["layer_5_provenance"]["trust_score"] == 0.9
+
     def test_stop_wakes_sleeping_daemon_thread(self):
         """stop() should wake the loop instead of waiting for the full interval."""
         store = MemoryBrainIndexStore()

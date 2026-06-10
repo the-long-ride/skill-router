@@ -188,6 +188,39 @@ def test_main_strips_slash_route(mock_cmd_route):
     assert args.text == ["draft", "article"]
 
 
+@patch("skills_router.cli.cmd_status")
+@patch("sys.argv", ["skills-router", "/skills-router", "/status"])
+def test_main_strips_slash_status(mock_cmd_status):
+    """Test that '/skills-router /status' normalises to status."""
+    from skills_router.cli import main
+
+    main()
+
+    mock_cmd_status.assert_called_once()
+
+
+@patch("skills_router.cli.cmd_connect")
+@patch("sys.argv", ["skills-router", "/skills-router", "/connect", "--target", "codex"])
+def test_main_strips_slash_connect(mock_cmd_connect):
+    """Test that '/skills-router /connect' normalises to connect."""
+    from skills_router.cli import main
+
+    main()
+
+    mock_cmd_connect.assert_called_once()
+
+
+@patch("skills_router.cli.cmd_analyze")
+@patch("sys.argv", ["skills-router", "/skills-router", "/analyze", "github:owner/repo"])
+def test_main_strips_slash_analyze(mock_cmd_analyze):
+    """Test that '/skills-router /analyze' normalises to analyze."""
+    from skills_router.cli import main
+
+    main()
+
+    mock_cmd_analyze.assert_called_once()
+
+
 @patch("skills_router.layers.registry_resolver.RegistryResolver.resolve")
 @patch("skills_router.cli._build_store")
 @patch("skills_router.cli.SkillsRouterOrchestrator")
@@ -232,6 +265,161 @@ def test_cmd_install_resolves_unseen_path_via_registry(
         dry_run=False,
     )
     assert rc == 0
+
+
+@patch("skills_router.layers.source_analyzer.SourceAnalyzer.analyze")
+@patch("skills_router.layers.registry_resolver.RegistryResolver.resolve")
+@patch("skills_router.cli._build_store")
+@patch("skills_router.cli.SkillsRouterOrchestrator")
+def test_cmd_install_source_link_falls_back_to_inferred_manifest(
+    mock_orchestrator, mock_build_store, mock_resolve, mock_analyze, tmp_path, capsys
+):
+    """Supported source links can be inferred when no manifest exists."""
+    from skills_router.cli import cmd_install
+    from skills_router.layers.registry_resolver import RegistryResolutionError
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path))
+    args = argparse.Namespace(
+        manifest="github:owner/repo",
+        scope="global",
+        all_agents=False,
+        agent_targets=None,
+        user="cli-user",
+        yes=True,
+        decision_policy="prompt",
+        dry_run=True,
+        explain=False,
+        json_output=True,
+        package_type="skillset",
+        routing_mode="full_package",
+        infer=False,
+    )
+    manifest_data = {
+        "tool_id": "repo",
+        "name": "Repo",
+        "version": "1.0.0",
+        "agent_package": {
+            "type": "skillset",
+            "skillsets": [
+                {"id": "default", "name": "Repo", "use_when": "repo tasks"}
+            ],
+        },
+    }
+    mock_resolve.side_effect = RegistryResolutionError("No skills-router.json")
+    mock_analyze.return_value = {
+        "status": "OK",
+        "manifest": manifest_data,
+        "source": {"identifier": "owner/repo"},
+        "evidence": {},
+    }
+    mock_inst = MagicMock()
+    mock_inst.install.return_value = {
+        "status": "DRY_RUN_APPROVED",
+        "tool_id": "repo",
+        "wg_case": "CASE_1",
+        "decision": "APPROVE",
+    }
+    mock_orchestrator.return_value = mock_inst
+
+    rc = cmd_install(args, config)
+
+    assert rc == 0
+    mock_analyze.assert_called_once_with("github:owner/repo")
+    mock_inst.install.assert_called_once_with(
+        manifest_data,
+        scope="global",
+        user_id="cli-user",
+        dry_run=True,
+    )
+    assert '"source_analysis": {' in capsys.readouterr().out
+
+
+def test_cmd_connect_json_outputs_mcp_config(tmp_path, capsys):
+    """Connect command renders machine-readable setup for an agent host."""
+    from skills_router.cli import cmd_connect
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path / "data"))
+    config.workspace_root = str(tmp_path)
+    args = argparse.Namespace(
+        target="codex",
+        agent_id="codex-local",
+        detail="compact",
+        from_source=False,
+        write_instructions=False,
+        instruction_file=None,
+        json_output=True,
+    )
+
+    rc = cmd_connect(args, config)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"target": "codex"' in out
+    assert '"command": "skills-router"' in out
+    assert '"bridge_prompt": ' in out
+
+
+def test_cmd_connect_dry_run_does_not_write_instruction_file(tmp_path, capsys):
+    """Connect dry-run previews instruction writes without touching disk."""
+    from skills_router.cli import cmd_connect
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path / "data"))
+    config.workspace_root = str(tmp_path)
+    instruction_file = "AGENTS.md"
+    args = argparse.Namespace(
+        target="codex",
+        agent_id="codex-local",
+        detail="compact",
+        from_source=False,
+        write_instructions=True,
+        instruction_file=instruction_file,
+        dry_run=True,
+        json_output=True,
+    )
+
+    rc = cmd_connect(args, config)
+
+    assert rc == 0
+    assert not (tmp_path / instruction_file).exists()
+    out = capsys.readouterr().out
+    assert '"status": "DRY_RUN"' in out
+    assert '"action": "would_create"' in out
+
+
+def test_cmd_uninstall_dry_run_preserves_tool(tmp_path, capsys):
+    """Uninstall dry-run should not delete Brain Index records."""
+    from skills_router.cli import cmd_uninstall
+    from skills_router.storage.memory_store import MemoryBrainIndexStore
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path))
+    store = MemoryBrainIndexStore(
+        brain_index_path=config.brain_index_path,
+        dep_graph_path=config.dep_graph_path,
+    )
+    store.save_tool({
+        "tool_id": "writer-pack",
+        "name": "Writer Pack",
+        "version": "1.0.0",
+    })
+    args = argparse.Namespace(
+        tool_id="writer-pack",
+        user="cli-user",
+        scope=None,
+        dry_run=True,
+        json_output=True,
+    )
+
+    rc = cmd_uninstall(args, config)
+
+    refreshed = MemoryBrainIndexStore(
+        brain_index_path=config.brain_index_path,
+        dep_graph_path=config.dep_graph_path,
+    )
+    assert rc == 0
+    assert refreshed.get_tool("writer-pack") is not None
+    out = capsys.readouterr().out
+    assert '"status": "DRY_RUN_UNINSTALLED"' in out
+    assert '"dry_run": true' in out
 
 
 @patch("skills_router.layers.registry_resolver.RegistryResolver.resolve")

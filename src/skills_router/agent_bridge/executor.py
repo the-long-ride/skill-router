@@ -6,7 +6,12 @@ from typing import Any
 
 from skills_router.config import SkillsRouterConfig
 from skills_router.layers.lockfile import SkillsRouterLockfile
-from skills_router.layers.registry_resolver import RegistryResolver
+from skills_router.layers.registry_resolver import RegistryResolutionError, RegistryResolver
+from skills_router.layers.source_analyzer import (
+    SourceAnalysisError,
+    SourceAnalyzer,
+    is_supported_source_ref,
+)
 from skills_router.orchestrator import SkillsRouterOrchestrator
 from skills_router.storage.base import AbstractBrainIndexStore
 from skills_router.storage.memory_store import MemoryBrainIndexStore
@@ -57,6 +62,8 @@ def execute_slash_command(
 def execute_intent(intent: SlashCommandIntent, config: SkillsRouterConfig) -> dict[str, Any]:
     """Execute a structured bridge intent."""
     store = _build_store(config)
+    if intent.command == "analyze":
+        return SourceAnalyzer(config).analyze(intent.arguments["source_ref"])
     if intent.command == "install":
         return _install(intent, config, store)
     if intent.command == "uninstall":
@@ -66,9 +73,15 @@ def execute_intent(intent: SlashCommandIntent, config: SkillsRouterConfig) -> di
             intent.arguments["tool_id"],
             user_id=intent.user_id,
             scope=intent.scope,
+            dry_run=intent.dry_run,
         )
     if intent.command == "index":
-        return index_installed_skillsets(config, store, scope=intent.scope)
+        return index_installed_skillsets(
+            config,
+            store,
+            scope=intent.scope,
+            persist=not intent.dry_run,
+        )
     if intent.command == "refine":
         from skills_router.agent_bridge.indexer import refine_installed_skillsets
 
@@ -78,11 +91,16 @@ def execute_intent(intent: SlashCommandIntent, config: SkillsRouterConfig) -> di
             skillset_names=intent.arguments.get("skillsets", []),
             scope=intent.scope,
             workspace_scope=_refine_workspace_scope(intent),
+            persist=not intent.dry_run,
         )
     if intent.command == "list":
         orchestrator = SkillsRouterOrchestrator(config=config, store=store)
         tools = orchestrator.list_tools(scope=intent.scope)
         return {"status": "OK", "tools": tools, "count": len(tools)}
+    if intent.command == "status":
+        from skills_router.status import build_router_status
+
+        return build_router_status(config, store)
     if intent.command == "inspect":
         orchestrator = SkillsRouterOrchestrator(config=config, store=store)
         tool_id = intent.arguments["tool_id"]
@@ -91,7 +109,7 @@ def execute_intent(intent: SlashCommandIntent, config: SkillsRouterConfig) -> di
             return {"status": "NOT_FOUND", "tool_id": tool_id}
         return {"status": "OK", "tool": tool}
     if intent.command == "watch":
-        return _watch_once(config, store)
+        return _watch_once(config, store, dry_run=intent.dry_run)
     if intent.command == "route":
         from skills_router.agent_bridge.routing import route_task
 
@@ -128,6 +146,11 @@ def summarize_result(result: dict[str, Any]) -> str:
     if status in {"CANCELLED", "DRY_RUN_CANCELLED"}:
         case = result.get("wg_case", "review")
         return f"Stopped: {tool_id or 'tool'} needs human approval ({case})."
+    if status == "DRY_RUN_UNINSTALLED":
+        return (
+            f"Dry run: would uninstall {tool_id or 'tool'} from Skills Router "
+            "metadata/routing. Package resources would not be removed."
+        )
     if status == "UNINSTALLED":
         return (
             f"Uninstalled {tool_id or 'tool'} from Skills Router metadata/routing. "
@@ -138,6 +161,20 @@ def summarize_result(result: dict[str, Any]) -> str:
     if status == "OK" and "tools" in result:
         count = result.get("count", len(result.get("tools", [])))
         return f"Listed {count} Skills Router tools."
+    if status == "OK" and "state_paths" in result and "skill_paths" in result:
+        return str(result.get("human_summary") or "Skills Router status loaded.")
+    if status == "OK" and "manifest" in result and "source" in result:
+        manifest = result.get("manifest", {})
+        source = result.get("source", {})
+        confidence = (
+            manifest.get("layer_meta", {})
+            .get("source_analysis", {})
+            .get("confidence", "unknown")
+        )
+        return (
+            f"Analyzed {source.get('identifier', 'source')}; "
+            f"inferred {manifest.get('tool_id', 'tool')} ({confidence} confidence)."
+        )
     if status in {"OK", "REVIEW_NEEDED", "EMPTY"} and "indexed_tools" in result:
         conflicts = result.get("conflict_count", 0)
         stale = result.get("stale_route_count", 0)
@@ -196,7 +233,7 @@ def _install(
     store: AbstractBrainIndexStore,
 ) -> dict[str, Any]:
     manifest_ref = intent.arguments["package_or_manifest"]
-    manifest = RegistryResolver(config).resolve(manifest_ref)
+    manifest, source_analysis = _resolve_manifest(config, manifest_ref)
     scope = "global" if intent.all_agents else intent.scope or "global"
     target_report = None
     if intent.all_agents:
@@ -232,8 +269,11 @@ def _install(
         user_id=intent.user_id,
         dry_run=intent.dry_run,
     )
+    result["dry_run"] = intent.dry_run
     if result.get("status") in ("INSTALLED", "DRY_RUN_APPROVED"):
         result["skills_routing"] = routing_plan
+    if source_analysis is not None:
+        result["source_analysis"] = source_analysis
     if target_report is not None:
         result["agent_targets"] = target_report
     if result.get("status") == "INSTALLED":
@@ -247,6 +287,24 @@ def _install(
         )
         persist_routing_plan(config, routing_plan)
     return result
+
+
+def _resolve_manifest(
+    config: SkillsRouterConfig,
+    manifest_ref: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    try:
+        return RegistryResolver(config).resolve(manifest_ref), None
+    except RegistryResolutionError as exc:
+        if not is_supported_source_ref(manifest_ref):
+            raise
+        try:
+            analysis = SourceAnalyzer(config).analyze(manifest_ref)
+        except SourceAnalysisError as source_exc:
+            raise ValueError(
+                f"{exc}; source inference also failed: {source_exc}"
+            ) from source_exc
+        return analysis["manifest"], analysis
 
 
 def _agent_target_summary(result: dict[str, Any]) -> str:
@@ -291,7 +349,12 @@ def _scope_option_index(scope: str, options: list[str]) -> int | None:
     return None
 
 
-def _watch_once(config: SkillsRouterConfig, store: AbstractBrainIndexStore) -> dict[str, Any]:
+def _watch_once(
+    config: SkillsRouterConfig,
+    store: AbstractBrainIndexStore,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
     from skills_router.daemon.live_signal_fetcher import LiveSignalFetcher
     from skills_router.daemon.registry_watch import RegistryWatchDaemon
     from skills_router.layers.semantic_evaluator import SemanticEvaluator
@@ -317,8 +380,9 @@ def _watch_once(config: SkillsRouterConfig, store: AbstractBrainIndexStore) -> d
         ),
         admin_channel_id=config.admin_channel_id,
         state_path=config.registry_watch_state_path,
+        dry_run=dry_run,
     )
-    return daemon.run_once(seed_hashes=True)
+    return daemon.run_once(seed_hashes=True, dry_run=dry_run)
 
 
 def _audit(intent: SlashCommandIntent, config: SkillsRouterConfig) -> dict[str, Any]:

@@ -88,6 +88,7 @@ def index_installed_skillsets(
 
     return {
         "status": status,
+        "dry_run": not persist,
         "indexed_tools": len(tools),
         "focused_tools": len(focus_tool_ids or []),
         "visible_tools": len(visible_tools),
