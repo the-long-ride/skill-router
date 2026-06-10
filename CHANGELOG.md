@@ -19,10 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Added one-time all-agent skill installs with target-aware route metadata.
 - Added bridge profiles for Antigravity, Cursor, Windsurf, and related agent targets.
+- Added source-link analysis for npm and GitHub packages with conservative inferred manifest drafts.
+- Added router status reporting for data paths, configured skill paths, and route counts.
+- Added agent bridge setup output through `connect`, including MCP config and target instructions.
 
 ### Changed
 - Tightened route lookup so custom agent target lists are enforced when a host target is provided.
 - Hardened state writes on Windows test and runtime paths.
+- Expanded dry-run support across write-capable CLI and MCP commands.
+- Documented local editable installs, virtualenv setup, and source-based agent connection flows.
 
 ## [0.0.1] - 2026-05-27
 

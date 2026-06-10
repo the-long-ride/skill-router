@@ -5,7 +5,7 @@ NPM/npx wrapper for the Python `skills-router` CLI.
 This package exists so JavaScript-first tools, IDEs, and agent workflows can run
 Skills Router through npm without vendoring the Python source into the npm
 package. On first run, the wrapper checks the installed Python package version
-and installs the matching PyPI release, for example `skills-router==0.0.1`.
+and installs the matching PyPI release, for example `skills-router==0.0.2`.
 
 ```sh
 npx @the-long-ride/skills-router --help
@@ -43,7 +43,7 @@ The rest of this README mirrors the root project documentation for
 
 # Skills Router
 
-[![Version](https://img.shields.io/badge/version-v0.0.1-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.0.2-orange.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 [![Author](https://img.shields.io/badge/author-the--long--ride-green.svg)](https://github.com/the-long-ride)
 [![Build Status](https://img.shields.io/badge/tests-199%20passed-success.svg)](tests/)
