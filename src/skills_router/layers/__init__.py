@@ -8,6 +8,7 @@ from skills_router.layers.capability_checker import CapabilityChecker
 from skills_router.layers.health_check import HealthChecker
 from skills_router.layers.lockfile import SkillsRouterLockfile
 from skills_router.layers.registry_resolver import RegistryResolver, RegistryResolutionError
+from skills_router.layers.source_analyzer import SourceAnalyzer, SourceAnalysisError
 
 __all__ = [
     "TrustGate",
@@ -19,4 +20,6 @@ __all__ = [
     "SkillsRouterLockfile",
     "RegistryResolver",
     "RegistryResolutionError",
+    "SourceAnalyzer",
+    "SourceAnalysisError",
 ]
