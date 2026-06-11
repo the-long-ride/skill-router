@@ -43,6 +43,10 @@ When the human writes a slash command, prefer this order:
    `skills-router chat "<request>" --target <target> --agent-id <agent-id> --json`.
 3. Use strict CLI commands only when the host already has structured arguments.
 
+Some IDE chat inputs reserve unknown slash commands before the model sees the
+message. For those hosts, especially the OpenAI Codex IDE extension, treat plain
+`skills-router ...` text the same as `/skills-router ...`.
+
 Examples:
 
 ```powershell
@@ -52,6 +56,7 @@ skills-router chat "/skills-router index" --target codex --agent-id codex-local 
 skills-router chat "/skills-router refine writer-pack engram" --target codex --agent-id codex-local --json
 skills-router chat "/skills-router route draft article" --target codex --agent-id codex-local --json
 skills-router chat "/skills-router status" --target codex --agent-id codex-local --json
+skills-router chat "skills-router status" --target codex-ide --agent-id codex-ide-local --json
 ```
 
 For `/skills-router refine` in chat, workspace-discovered routes default to
@@ -111,11 +116,15 @@ Generate an agent-host setup kit:
 skills-router connect --target codex --json
 skills-router connect --target codex --write-instructions
 skills-router connect --target codex --from-source --json
+skills-router connect --target codex-ide --from-source --json
+skills-router connect --target codex-ide --write-skill
 ```
 
-`connect` returns the MCP config, bridge prompt, target instruction files, and
-CLI fallback command. `--write-instructions` writes a managed bridge prompt
-block to the first target instruction file in the current workspace.
+`connect` returns the MCP config, bridge prompt, target instruction files, target
+skill folders, and CLI fallback command. `--write-instructions` writes a managed
+bridge prompt block to the first target instruction file in the current
+workspace. `--write-skill` writes a managed `SKILL.md` to the first target
+workspace skill folder, such as `.codex/skills/skills-router/SKILL.md`.
 
 ## CLI Commands
 
@@ -125,6 +134,8 @@ Use connect when a human wants to attach Skills Router to an AI-agent host:
 
 ```powershell
 skills-router connect --target codex --json
+skills-router connect --target codex-ide --write-skill
+skills-router connect --target codex-ide --write-skill --dry-run
 skills-router connect --target cursor --write-instructions
 skills-router connect --target cursor --write-instructions --dry-run
 skills-router connect --target codex --from-source --json
@@ -133,10 +144,15 @@ skills-router connect --target codex --from-source --json
 Expected behavior:
 
 - Return a host-ready MCP config for `skills-router mcp`.
-- Return the compact bridge prompt and target instruction file paths.
+- Return the compact bridge prompt, target instruction file paths, and target
+  skill folder paths.
 - In `--from-source` mode, use Python plus `PYTHONPATH` to run this checkout.
 - Only write instruction files when `--write-instructions` is present.
-- `--dry-run` previews the instruction-file action without writing files.
+- Only write agent skill files when `--write-skill` is present.
+- `--write-skill` creates or updates only the managed
+  `skills-router/SKILL.md` file and refuses to overwrite unmanaged skill files.
+- `--dry-run` previews instruction-file and skill-file actions without writing
+  files.
 
 ### Analyze
 
@@ -367,6 +383,7 @@ Render compact bridge instructions for a host:
 ```powershell
 skills-router prompt --list
 skills-router prompt --target codex
+skills-router prompt --target codex-ide
 skills-router prompt --target cline
 skills-router prompt --target kiro
 skills-router prompt --target claude
@@ -389,6 +406,7 @@ Supported targets:
 | Target | Suggested instruction location | Preferred call |
 | :--- | :--- | :--- |
 | `codex` | `AGENTS.md` | MCP `run_slash_command` |
+| `codex-ide` | `AGENTS.md`, `.codex/skills/skills-router/SKILL.md` | MCP `run_slash_command`; plain `skills-router ...` if slash input is intercepted |
 | `cline` | `.clinerules/skills-router.md`, `AGENTS.md` | MCP `run_slash_command` |
 | `kiro` | `.kiro/steering/skills-router.md`, `AGENTS.md` | MCP `run_slash_command` |
 | `claude` | `CLAUDE.md`, `.claude/commands/skills-router.md` | MCP `run_slash_command` |
@@ -403,7 +421,7 @@ Supported targets:
 
 The rendered prompt tells the host to:
 
-- treat `/skills-router` as a skill/routing request,
+- treat `/skills-router` and `skills-router` as skill/routing requests,
 - prefer MCP `run_slash_command`,
 - fall back to `skills-router chat`,
 - keep install scope workspace-local unless the human says global,

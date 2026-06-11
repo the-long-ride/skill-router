@@ -37,7 +37,8 @@ def _render_compact_agent_prompt(profile: AgentProfile, *, agent_id: str) -> str
         f"""
         # Skills Router Bridge: {profile.display_name}
 
-        Trigger: user text starting `/skills-router` is a registry/routing request.
+        Trigger: user text starting `/skills-router` or `skills-router` is a
+        registry/routing request.
         Cheapest path:
         1. Prefer MCP `run_slash_command` with the full user text.
         2. For structured calls, use `refine_routes` or `route_task`;
@@ -45,8 +46,8 @@ def _render_compact_agent_prompt(profile: AgentProfile, *, agent_id: str) -> str
         3. Fallback: `skills-router chat "<request>" --target {profile.target}
            --agent-id {agent_id} --json`.
 
-        Examples: `/skills-router install <pkg> for me`, `/skills-router install
-        <pkg> for all agents`, `/skills-router refine`, `/skills-router route <task>`.
+        Examples: `/skills-router install <pkg> for me`, `skills-router install
+        <pkg> for all agents`, `/skills-router refine`, `skills-router route <task>`.
         Scope: default `workspace:{agent_id}`; `global` or `all agents` uses
         global routes. Blank/named refine discovers while comparing visible scopes.
         Safety: uninstall removes only Skills Router metadata. Keep
@@ -70,7 +71,10 @@ def _render_full_agent_prompt(profile: AgentProfile, *, agent_id: str) -> str:
         # Skills Router Bridge: {profile.display_name}
 
         You can manage this agent's tool registry through Skills Router. Treat any user
-        message that starts with `/skills-router` as a registry-management request.
+        message that starts with `/skills-router` or `skills-router` as a
+        registry-management request. Some IDE chat inputs reserve unknown slash
+        commands; when that happens, route the plain-text `skills-router ...`
+        form the same way.
 
         Preferred execution order:
         1. If MCP tools are available, call `run_slash_command` with the user's full text.

@@ -926,6 +926,7 @@ def cmd_connect(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
     from skills_router.agent_bridge.connect import (
         build_agent_connection,
         write_bridge_instructions,
+        write_bridge_skill,
     )
 
     try:
@@ -941,6 +942,13 @@ def cmd_connect(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
                 config,
                 result,
                 instruction_file=args.instruction_file,
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+        if getattr(args, "write_skill", False):
+            result["written_skill"] = write_bridge_skill(
+                config,
+                result,
+                skill_dir=getattr(args, "skill_dir", None),
                 dry_run=bool(getattr(args, "dry_run", False)),
             )
         result["dry_run"] = bool(getattr(args, "dry_run", False))
@@ -982,13 +990,35 @@ def cmd_connect(args: argparse.Namespace, config: SkillsRouterConfig) -> int:
             str(item["path"]),
         )
     console.print(table)
+    if result.get("skill_dirs"):
+        skill_table = Table(
+            title="Skill Directories",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        skill_table.add_column("Use")
+        skill_table.add_column("Exists")
+        skill_table.add_column("Path")
+        for item in result["skill_dirs"]:
+            skill_table.add_row(
+                "yes" if item["recommended"] else "",
+                "yes" if item["exists"] else "no",
+                str(item["path"]),
+            )
+        console.print(skill_table)
     if result.get("written_instruction"):
         written = result["written_instruction"]
         console.print(
             f"[green]{written['action'].title()} bridge prompt:[/green] "
             f"{written['path']}"
         )
-    else:
+    if result.get("written_skill"):
+        written = result["written_skill"]
+        console.print(
+            f"[green]{written['action'].title()} bridge skill:[/green] "
+            f"{written['path']}"
+        )
+    if not result.get("written_instruction") and not result.get("written_skill"):
         console.print(Panel(
             result["bridge_prompt"],
             title="[bold cyan]Bridge Prompt[/bold cyan]",
@@ -1103,7 +1133,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Agent target for --all-agents; repeat or comma-separate values "
             "(default: antigravity, antigravity-cli, antigravity-ide, codex, "
-            "claude, hermes-agent, opencode, cline, cursor, windsurf)"
+            "codex-ide, claude, hermes-agent, opencode, cline, cursor, windsurf)"
         ),
     )
     p_install.add_argument("--user", help="User ID (default: cli-user)")
@@ -1286,7 +1316,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help=(
             "Agent target or alias (antigravity, antigravity-cli, "
-            "antigravity-ide, codex, claude, hermes-agent, opencode, "
+            "antigravity-ide, codex, codex-ide, claude, hermes-agent, opencode, "
             "cline, cursor, windsurf)"
         ),
     )
@@ -1340,13 +1370,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write or update a managed bridge prompt block in an instruction file",
     )
     p_connect.add_argument(
+        "--write-skill",
+        action="store_true",
+        help="Write or update a managed Skills Router SKILL.md in the target skill folder",
+    )
+    p_connect.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview --write-instructions without writing files",
+        help="Preview --write-instructions or --write-skill without writing files",
     )
     p_connect.add_argument(
         "--instruction-file",
         help="Workspace-relative instruction file to write when --write-instructions is set",
+    )
+    p_connect.add_argument(
+        "--skill-dir",
+        help="Workspace-relative skill root to write when --write-skill is set",
     )
     _add_json_arg(p_connect)
 

@@ -18,6 +18,7 @@ def test_profiles_include_requested_agent_targets():
         "antigravity-cli",
         "antigravity-ide",
         "codex",
+        "codex-ide",
         "cline",
         "cursor",
         "kiro",
@@ -49,6 +50,28 @@ def test_render_agent_prompt_full_detail_keeps_expanded_contract():
 
     assert "Preferred execution order" in prompt
     assert "Parsing rules" in prompt
+
+
+def test_codex_ide_profile_accepts_vscode_alias_and_plain_trigger(tmp_path):
+    from skills_router.agent_bridge.connect import build_agent_connection
+    from skills_router.agent_bridge.prompts import render_agent_prompt
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path / "data"))
+    config.workspace_root = str(tmp_path)
+
+    result = build_agent_connection(
+        config,
+        target="codex-vscode",
+        agent_id="codex-ide-local",
+    )
+    prompt = render_agent_prompt("chatgpt-vscode", agent_id="codex-ide-local")
+
+    assert result["target"] == "codex-ide"
+    assert result["display_name"] == "OpenAI Codex IDE Extension"
+    assert "--target codex-ide" in result["fallback_command"]
+    assert result["skill_dirs"][0]["configured"] == ".codex/skills"
+    assert "`skills-router`" in prompt
+    assert "ordinary chat text" in prompt
 
 
 def test_build_agent_connection_from_source_includes_mcp_env(tmp_path):
@@ -94,6 +117,37 @@ def test_write_bridge_instructions_creates_managed_block(tmp_path):
     assert second["action"] == "updated"
     assert text.count(BEGIN_MARKER) == 1
     assert "# Changed Bridge" in text
+
+
+def test_write_bridge_skill_creates_managed_skill_file(tmp_path):
+    from skills_router.agent_bridge.connect import (
+        SKILL_BEGIN_MARKER,
+        build_agent_connection,
+        write_bridge_skill,
+    )
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path / "data"))
+    config.workspace_root = str(tmp_path)
+    result = build_agent_connection(
+        config,
+        target="codex-vscode",
+        agent_id="codex-ide-local",
+    )
+
+    first = write_bridge_skill(config, result)
+    result["bridge_prompt"] = "# Changed Skill Bridge"
+    second = write_bridge_skill(config, result)
+    dry = write_bridge_skill(config, result, dry_run=True)
+
+    path = tmp_path / ".codex" / "skills" / "skills-router" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    assert first["action"] == "created"
+    assert second["action"] == "updated"
+    assert dry["action"] == "would_update"
+    assert first["path"] == str(path)
+    assert text.startswith("---\nname: skills-router\n")
+    assert text.count(SKILL_BEGIN_MARKER) == 1
+    assert "# Changed Skill Bridge" in text
 
 
 def test_parse_install_for_me_uses_workspace_scope():
@@ -170,8 +224,22 @@ def test_parse_all_agents_install_sets_global_target_scope():
     assert intent.scope == "global"
     assert intent.all_agents is True
     assert "codex" in intent.agent_targets
+    assert "codex-ide" in intent.agent_targets
     assert "cursor" in intent.agent_targets
     assert "windsurf" in intent.agent_targets
+
+
+def test_parse_plain_skills_router_text_supports_ide_fallback():
+    from skills_router.agent_bridge.parser import parse_slash_command
+
+    intent = parse_slash_command(
+        "skills-router status",
+        target="codex-vscode",
+        agent_id="codex-ide-local",
+    )
+
+    assert intent.command == "status"
+    assert intent.target == "codex-ide"
 
 
 def test_parse_index_command_defaults_to_all_scopes():
@@ -958,9 +1026,9 @@ def test_execute_slash_command_installs_once_for_all_agents(
     assert result["status"] == "INSTALLED"
     assert result["intent"]["all_agents"] is True
     assert result["intent"]["scope"] == "global"
-    assert result["agent_targets"]["target_count"] == 10
+    assert result["agent_targets"]["target_count"] == 11
     assert "cursor" in result["skills_routing"]["target_agents"]
-    assert "Applies to 10 agent target(s)" in result["human_summary"]
+    assert "Applies to 11 agent target(s)" in result["human_summary"]
     routing_file = tmp_path / "skills-router.json"
     packages = json.loads(routing_file.read_text())["packages"]
     assert packages["weather-tool"]["scope"] == "global"

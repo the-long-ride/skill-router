@@ -13,6 +13,8 @@ from skills_router.config import SkillsRouterConfig
 
 BEGIN_MARKER = "<!-- BEGIN SKILLS ROUTER BRIDGE -->"
 END_MARKER = "<!-- END SKILLS ROUTER BRIDGE -->"
+SKILL_BEGIN_MARKER = "<!-- BEGIN SKILLS ROUTER BRIDGE SKILL -->"
+SKILL_END_MARKER = "<!-- END SKILLS ROUTER BRIDGE SKILL -->"
 
 
 def build_agent_connection(
@@ -35,6 +37,10 @@ def build_agent_connection(
         _instruction_entry(raw, config, recommended=idx == 0)
         for idx, raw in enumerate(profile.instruction_files)
     ]
+    skill_dirs = [
+        _skill_dir_entry(raw, config, recommended=idx == 0)
+        for idx, raw in enumerate(profile.workspace_skill_dirs)
+    ]
     fallback_command = _fallback_command(
         profile.target,
         agent_id=agent_id,
@@ -50,6 +56,7 @@ def build_agent_connection(
         "mcp_server": mcp_server,
         "bridge_prompt": bridge_prompt,
         "instruction_files": instruction_files,
+        "skill_dirs": skill_dirs,
         "fallback_command": fallback_command,
         "human_summary": (
             f"Connection kit ready for {profile.display_name}. Add the MCP "
@@ -67,7 +74,7 @@ def write_bridge_instructions(
 ) -> dict[str, Any]:
     """Write or update a managed bridge prompt block in an instruction file."""
     target = instruction_file or _default_instruction_file(connection)
-    path = _resolve_instruction_path(target, config)
+    path = _resolve_workspace_path(target, config, label="Instruction files")
     block = _managed_block(str(connection["bridge_prompt"]))
     action = "created"
     if path.exists():
@@ -90,6 +97,48 @@ def write_bridge_instructions(
         }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(updated, encoding="utf-8")
+    return {
+        "status": "OK",
+        "dry_run": False,
+        "action": action,
+        "path": str(path),
+    }
+
+
+def write_bridge_skill(
+    config: SkillsRouterConfig,
+    connection: dict[str, Any],
+    *,
+    skill_dir: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Write or update a managed Skills Router SKILL.md for one agent target."""
+    target = skill_dir or _default_skill_dir(connection)
+    root = _resolve_workspace_path(target, config, label="Skill directories")
+    path = root / "skills-router" / "SKILL.md"
+    content = _skill_document(connection)
+    action = "created"
+    if path.exists():
+        current = path.read_text(encoding="utf-8")
+        if SKILL_BEGIN_MARKER not in current or SKILL_END_MARKER not in current:
+            raise ValueError(
+                "Refusing to overwrite unmanaged Skills Router skill file. "
+                f"Got: {path}"
+            )
+        action = "updated"
+    if dry_run:
+        preview_action = {
+            "created": "would_create",
+            "updated": "would_update",
+        }.get(action, f"would_{action}")
+        return {
+            "status": "DRY_RUN",
+            "dry_run": True,
+            "action": preview_action,
+            "path": str(path),
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
     return {
         "status": "OK",
         "dry_run": False,
@@ -127,11 +176,29 @@ def _instruction_entry(
     *,
     recommended: bool,
 ) -> dict[str, Any]:
-    path = _resolve_instruction_path(raw, config)
+    path = _resolve_workspace_path(raw, config, label="Instruction files")
     return {
         "configured": raw,
         "path": str(path),
         "exists": path.exists(),
+        "recommended": recommended,
+    }
+
+
+def _skill_dir_entry(
+    raw: str,
+    config: SkillsRouterConfig,
+    *,
+    recommended: bool,
+) -> dict[str, Any]:
+    path = _resolve_workspace_path(raw, config, label="Skill directories")
+    skill_path = path / "skills-router" / "SKILL.md"
+    return {
+        "configured": raw,
+        "path": str(path),
+        "skill_path": str(skill_path),
+        "exists": path.exists(),
+        "skill_exists": skill_path.exists(),
         "recommended": recommended,
     }
 
@@ -143,7 +210,14 @@ def _default_instruction_file(connection: dict[str, Any]) -> str:
     return str(files[0]["configured"])
 
 
-def _resolve_instruction_path(raw: str, config: SkillsRouterConfig) -> Path:
+def _default_skill_dir(connection: dict[str, Any]) -> str:
+    dirs = connection.get("skill_dirs") or []
+    if not dirs:
+        raise ValueError("No workspace skill directory is configured for this agent target")
+    return str(dirs[0]["configured"])
+
+
+def _resolve_workspace_path(raw: str, config: SkillsRouterConfig, *, label: str) -> Path:
     workspace_root = Path(config.workspace_root).resolve(strict=False)
     path = Path(raw).expanduser()
     if not path.is_absolute():
@@ -153,7 +227,7 @@ def _resolve_instruction_path(raw: str, config: SkillsRouterConfig) -> Path:
         path.relative_to(workspace_root)
     except ValueError as exc:
         raise ValueError(
-            "Instruction files must be inside the workspace root. "
+            f"{label} must be inside the workspace root. "
             f"Got: {path}"
         ) from exc
     return path
@@ -161,6 +235,21 @@ def _resolve_instruction_path(raw: str, config: SkillsRouterConfig) -> Path:
 
 def _managed_block(prompt: str) -> str:
     return f"{BEGIN_MARKER}\n{prompt.strip()}\n{END_MARKER}"
+
+
+def _skill_document(connection: dict[str, Any]) -> str:
+    prompt = str(connection["bridge_prompt"]).strip()
+    return (
+        "---\n"
+        "name: skills-router\n"
+        "description: Use when the user asks Skills Router to manage AI-agent "
+        "skills, plugins, routes, or messages starting /skills-router or "
+        "skills-router.\n"
+        "---\n\n"
+        f"{SKILL_BEGIN_MARKER}\n"
+        f"{prompt}\n"
+        f"{SKILL_END_MARKER}\n"
+    )
 
 
 def _replace_or_append_block(text: str, block: str) -> str:

@@ -386,6 +386,38 @@ def test_cmd_connect_dry_run_does_not_write_instruction_file(tmp_path, capsys):
     assert '"action": "would_create"' in out
 
 
+def test_cmd_connect_write_skill_creates_skill_file(tmp_path, capsys):
+    """Connect can inject the bridge as a target agent skill."""
+    from skills_router.cli import cmd_connect
+
+    config = SkillsRouterConfig(data_dir=str(tmp_path / "data"))
+    config.workspace_root = str(tmp_path)
+    args = argparse.Namespace(
+        target="codex-vscode",
+        agent_id="codex-ide-local",
+        detail="compact",
+        from_source=False,
+        write_instructions=False,
+        write_skill=True,
+        instruction_file=None,
+        skill_dir=None,
+        dry_run=False,
+        json_output=True,
+    )
+
+    rc = cmd_connect(args, config)
+
+    assert rc == 0
+    skill_path = tmp_path / ".codex" / "skills" / "skills-router" / "SKILL.md"
+    assert skill_path.exists()
+    text = skill_path.read_text(encoding="utf-8")
+    assert "name: skills-router" in text
+    assert "OpenAI Codex IDE Extension" in text
+    out = capsys.readouterr().out
+    assert '"written_skill": {' in out
+    assert '"target": "codex-ide"' in out
+
+
 def test_cmd_uninstall_dry_run_preserves_tool(tmp_path, capsys):
     """Uninstall dry-run should not delete Brain Index records."""
     from skills_router.cli import cmd_uninstall

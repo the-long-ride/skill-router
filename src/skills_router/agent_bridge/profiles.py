@@ -25,6 +25,7 @@ DEFAULT_ALL_AGENT_TARGETS: tuple[str, ...] = (
     "antigravity-cli",
     "antigravity-ide",
     "codex",
+    "codex-ide",
     "claude",
     "hermes-agent",
     "opencode",
@@ -37,7 +38,7 @@ DEFAULT_ALL_AGENT_TARGETS: tuple[str, ...] = (
 _PROFILES: dict[str, AgentProfile] = {
     "codex": AgentProfile(
         target="codex",
-        display_name="OpenAI Codex",
+        display_name="OpenAI Codex CLI",
         aliases=("openai-codex", "codex-cli"),
         instruction_files=("AGENTS.md",),
         mcp_config_hint=(
@@ -50,6 +51,38 @@ _PROFILES: dict[str, AgentProfile] = {
         ),
         notes=(
             "Keep the bridge prompt in AGENTS.md or the project instructions Codex reads.",
+            "Prefer JSON output and summarize only the human-facing result.",
+        ),
+        workspace_skill_dirs=(".codex/skills", ".agents/skills"),
+        global_skill_dirs=("$CODEX_HOME/skills", "~/.codex/skills"),
+    ),
+    "codex-ide": AgentProfile(
+        target="codex-ide",
+        display_name="OpenAI Codex IDE Extension",
+        aliases=(
+            "codex-vscode",
+            "codex-vs-code",
+            "codex-extension",
+            "openai-codex-ide",
+            "openai-codex-vscode",
+            "openai-chatgpt",
+            "chatgpt-vscode",
+        ),
+        instruction_files=("AGENTS.md",),
+        mcp_config_hint=(
+            'Use a Codex plugin or IDE MCP config that starts command '
+            '"skills-router" with args ["mcp"].'
+        ),
+        invocation_hint=(
+            'If MCP/plugins are unavailable, run '
+            '`python -m skills_router.cli chat "<slash request>" --target codex-ide --json` '
+            'from this checkout, or `skills-router chat ...` when installed on PATH.'
+        ),
+        notes=(
+            "The IDE extension slash picker lists built-in commands; keep this bridge "
+            "in AGENTS.md so the model can route Skills Router requests.",
+            "If `/skills-router` is intercepted by the IDE input, send "
+            "`skills-router ...` as ordinary chat text.",
             "Prefer JSON output and summarize only the human-facing result.",
         ),
         workspace_skill_dirs=(".codex/skills", ".agents/skills"),
