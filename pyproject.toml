@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skills-router"
-version = "0.0.2"
+version = "0.0.3"
 description = "Skills Router — trust-gated install, update indexing, and routing for AI-agent skills and plugins"
 readme = "README.md"
 requires-python = ">=3.10"

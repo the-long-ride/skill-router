@@ -1,9 +1,9 @@
 # Skills Router
 
-[![Version](https://img.shields.io/badge/version-v0.0.2-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.0.3-orange.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 [![Author](https://img.shields.io/badge/author-the--long--ride-green.svg)](https://github.com/the-long-ride)
-[![Build Status](https://img.shields.io/badge/tests-199%20passed-success.svg)](tests/)
+[![Build Status](https://img.shields.io/badge/tests-225%20passed-success.svg)](tests/)
 
 [English](README.md) | [Español](readme/es.md) | [简体中文](readme/zh.md) | [日本語](readme/ja.md) | [Deutsch](readme/de.md) | [Français](readme/fr.md)
 
@@ -51,8 +51,8 @@ trail, and routing layer.
 - Shows current metadata, routing, and configured skill-folder paths with
   `skills-router status`.
 - Supports the default all-agent host set: `antigravity`, `antigravity-cli`,
-  `antigravity-ide`, `codex`, `claude`, `hermes-agent`, `opencode`, `cline`,
-  `cursor`, and `windsurf`.
+  `antigravity-ide`, `codex`, `codex-ide`, `claude`, `hermes-agent`,
+  `opencode`, `cline`, `cursor`, and `windsurf`.
 - Treats partial installs as selective route activation, not partial package
   extraction.
 - Removes Skills Router-owned metadata/routing on uninstall, then re-indexes the
@@ -301,7 +301,7 @@ remain owned by the host package manager or skill installer.
 Default all-agent targets:
 
 ```text
-antigravity, antigravity-cli, antigravity-ide, codex, claude,
+antigravity, antigravity-cli, antigravity-ide, codex, codex-ide, claude,
 hermes-agent, opencode, cline, cursor, windsurf
 ```
 
@@ -431,6 +431,7 @@ lists are enforced for the calling host.
 | `antigravity-cli` | `.agent/rules/skills-router.md`, `AGENTS.md` |
 | `antigravity-ide` | `.agent/rules/skills-router.md`, `.antigravity/rules/skills-router.md`, `AGENTS.md` |
 | `codex` | `AGENTS.md` |
+| `codex-ide` | `AGENTS.md` |
 | `cline` | `.clinerules/skills-router.md`, `AGENTS.md` |
 | `cursor` | `.cursor/rules/skills-router.md`, `AGENTS.md` |
 | `kiro` | `.kiro/steering/skills-router.md`, `AGENTS.md` |
@@ -444,18 +445,23 @@ Generate a setup kit for an agent host with:
 
 ```bash
 skills-router connect --target codex --json
+skills-router connect --target codex-ide --from-source --json
+skills-router connect --target codex-ide --write-skill
 skills-router connect --target cursor --write-instructions
 skills-router connect --target codex --from-source --json
 ```
 
 `connect` returns the MCP server config, target instruction file paths, bridge
-prompt, and CLI fallback command. `--write-instructions` writes a managed bridge
-prompt block to the target's first workspace instruction file.
+prompt, skill folder paths, and CLI fallback command. `--write-instructions`
+writes a managed bridge prompt block to the target's first workspace instruction
+file. `--write-skill` writes a compact managed `SKILL.md` to the target's first
+workspace skill folder, such as `.codex/skills/skills-router/SKILL.md`.
 
 Render only target-specific bridge text with:
 
 ```bash
 skills-router prompt --target codex
+skills-router prompt --target codex-ide
 skills-router prompt --target cursor
 skills-router prompt --target windsurf
 skills-router prompt --target codex --detail full

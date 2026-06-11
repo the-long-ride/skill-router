@@ -5,14 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.0.3] - 2026-06-07
+## [0.0.3] - 2026-06-11
 
 ### Added
 - Added PyPI publishing to the tag release workflow using GitHub OIDC trusted publishing.
+- Added `codex-ide` as a first-class target for the OpenAI Codex IDE extension.
+- Added `connect --write-skill` to inject a managed Skills Router `SKILL.md`
+  into the target agent skill folder.
+- Added workspace `.codex/skills/skills-router/SKILL.md` bridge instructions for
+  Codex IDE skill discovery.
 
 ### Changed
 - Pinned the npm wrapper bootstrap install to the matching `skills-router` PyPI version.
 - Updated the npm package README to explain the wrapper first, then include the full project README.
+- Updated bridge prompts to treat both `/skills-router ...` and plain
+  `skills-router ...` as Skills Router requests for IDEs that intercept slash
+  input.
+- Updated README and integration guidelines for Codex IDE setup and managed
+  skill-file injection.
 
 ## [0.0.2] - 2026-06-06
 
